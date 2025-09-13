@@ -1,7 +1,4 @@
-﻿# Upgrade pip first
---upgrade pip==25.2
-
-# Core Streamlit
+﻿# Core Streamlit
 streamlit==1.28.0
 streamlit-webrtc==0.47.1
 
