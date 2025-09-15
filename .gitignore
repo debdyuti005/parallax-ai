@@ -1,3 +1,5 @@
 *.bak
 __pycache__/
 parallax-ai/
+proctoring_state.json
+violations_log.json

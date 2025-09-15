@@ -16,6 +16,12 @@ import matplotlib.dates as mdates
 import sounddevice as sd
 import threading
 
+
+#warnings
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+
 # Import your existing modules
 import audio
 import detection
