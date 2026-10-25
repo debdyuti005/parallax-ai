@@ -316,58 +316,62 @@ with col_charts:
     log_placeholder = st.empty()
 
 # Process data and update dashboard in real time
-if webrtc_ctx.video_processor:
-    # Synchronize sidebar controls with processor
-    webrtc_ctx.video_processor.yaw_threshold = yaw_threshold
-    webrtc_ctx.video_processor.pitch_threshold = pitch_threshold
-    webrtc_ctx.video_processor.cheat_threshold = cheat_threshold
-    webrtc_ctx.video_processor.draw_mesh = draw_mesh
-    webrtc_ctx.video_processor.draw_vector = draw_vector
+if webrtc_ctx.state.playing:
+    while webrtc_ctx.state.playing:
+        if webrtc_ctx.video_processor:
+            # Synchronize sidebar controls with processor
+            webrtc_ctx.video_processor.yaw_threshold = yaw_threshold
+            webrtc_ctx.video_processor.pitch_threshold = pitch_threshold
+            webrtc_ctx.video_processor.cheat_threshold = cheat_threshold
+            webrtc_ctx.video_processor.draw_mesh = draw_mesh
+            webrtc_ctx.video_processor.draw_vector = draw_vector
 
-    score = webrtc_ctx.video_processor.percentage_cheat
-    gaze = webrtc_ctx.video_processor.gaze_text
-    yaw = webrtc_ctx.video_processor.yaw_angle
-    violations = webrtc_ctx.video_processor.total_violations
-    history = webrtc_ctx.video_processor.prob_history
-    incidents = webrtc_ctx.video_processor.incidents
+            with webrtc_ctx.video_processor.lock:
+                score = webrtc_ctx.video_processor.percentage_cheat
+                gaze = webrtc_ctx.video_processor.gaze_text
+                yaw = webrtc_ctx.video_processor.yaw_angle
+                violations = webrtc_ctx.video_processor.total_violations
+                history = list(webrtc_ctx.video_processor.prob_history)
+                incidents = list(webrtc_ctx.video_processor.incidents)
+                is_cheat = webrtc_ctx.video_processor.global_cheat
 
-    # Status Banner
-    if webrtc_ctx.video_processor.global_cheat:
-        status_placeholder.markdown(f"""
-            <div class="status-banner status-cheat">
-                <span>🚨 ALERT: SUSPICIOUS BEHAVIOR DETECTED (Score: {score:.2f})</span>
-                <span>CHEATING FLAGGED</span>
-            </div>
-        """, unsafe_allow_html=True)
-    elif score > 0.35:
-        status_placeholder.markdown(f"""
-            <div class="status-banner status-warning">
-                <span>⚠️ CAUTION: Irregular gaze activity detected</span>
-                <span>MONITORING CLOSELY</span>
-            </div>
-        """, unsafe_allow_html=True)
-    else:
-        status_placeholder.markdown("""
-            <div class="status-banner status-clean">
-                <span>🟢 CANDIDATE NORMAL — Active proctoring stream</span>
-                <span>INTEGRITY VERIFIED</span>
-            </div>
-        """, unsafe_allow_html=True)
+            # Status Banner
+            if is_cheat:
+                status_placeholder.markdown(f"""
+                    <div class="status-banner status-cheat">
+                        <span>🚨 ALERT: SUSPICIOUS BEHAVIOR DETECTED (Score: {score:.2f})</span>
+                        <span>CHEATING FLAGGED</span>
+                    </div>
+                """, unsafe_allow_html=True)
+            elif score > 0.35:
+                status_placeholder.markdown(f"""
+                    <div class="status-banner status-warning">
+                        <span>⚠️ CAUTION: Irregular gaze activity detected</span>
+                        <span>MONITORING CLOSELY</span>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                status_placeholder.markdown("""
+                    <div class="status-banner status-clean">
+                        <span>🟢 CANDIDATE NORMAL — Active proctoring stream</span>
+                        <span>INTEGRITY VERIFIED</span>
+                    </div>
+                """, unsafe_allow_html=True)
 
-    # 4 Metric Cards
-    prob_metric.metric("Cheat Probability", f"{score * 100:.1f}%")
-    gaze_metric.metric("Gaze Direction", gaze)
-    yaw_metric.metric("Yaw / Pitch Angle", f"{yaw:.1f}°")
-    events_metric.metric("Flagged Events", f"{violations}")
+            # 4 Metric Cards
+            prob_metric.metric("Cheat Probability", f"{score * 100:.1f}%")
+            gaze_metric.metric("Gaze Direction", gaze)
+            yaw_metric.metric("Yaw / Pitch Angle", f"{yaw:.1f}°")
+            events_metric.metric("Flagged Events", f"{violations}")
 
-    # Live Rolling Trend Chart
-    chart_placeholder.line_chart(pd.DataFrame({"Cheat Probability": history}), height=240)
+            # Live Rolling Trend Chart
+            chart_placeholder.line_chart(pd.DataFrame({"Cheat Probability": history}), height=240)
 
-    # Incident Log Table
-    if incidents:
-        log_placeholder.dataframe(pd.DataFrame(incidents[:10]), height=200)
-    else:
-        log_placeholder.info("No suspicious incidents detected yet.")
+            # Incident Log Table
+            if incidents:
+                log_placeholder.dataframe(pd.DataFrame(incidents[:10]), height=200)
+
+        time.sleep(0.2)
 
     # Export Audit Report in Sidebar
     if incidents:
