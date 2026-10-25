@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from streamlit_webrtc import (
+    AudioProcessorBase,
     RTCConfiguration,
     VideoProcessorBase,
     WebRtcMode,
@@ -15,7 +16,7 @@ from streamlit_webrtc import (
 )
 
 # ==============================================================================
-# Page Configuration & Modern Custom CSS
+# Page Configuration & Modern Theme Styling
 # ==============================================================================
 st.set_page_config(
     page_title="Parallax AI Proctor",
@@ -66,7 +67,26 @@ st.markdown("""
 
 
 # ==============================================================================
-# Proctoring Mathematical & Detection Logic
+# Shared State for Multi-modal Telemetry (Video + Audio)
+# ==============================================================================
+class ProctorState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.audio_amplitude = 0.0
+        self.audio_cheat = 0
+        self.audio_threshold = 15.0
+
+
+@st.cache_resource
+def get_shared_state():
+    return ProctorState()
+
+
+shared_state = get_shared_state()
+
+
+# ==============================================================================
+# Proctoring Math & Detection Logic
 # ==============================================================================
 def update_cheat_percentage(current, previous):
     """Calculates cheat probability matching detection.py formula"""
@@ -81,26 +101,67 @@ def update_cheat_percentage(current, previous):
     return 1 * previous + 0.1 * current
 
 
-def compute_frame_weight(global_cheat, x_cheat, y_cheat):
-    """Calculates increment weight based on behavioral state"""
+def compute_frame_weight(global_cheat, x_cheat, y_cheat, audio_cheat):
+    """Calculates increment weight combining Gaze + Audio events"""
     if global_cheat == 0:
         if x_cheat == 0:
-            return 0.20 if y_cheat != 0 else 0.0
+            if y_cheat == 0:
+                return 0.25 if audio_cheat else 0.0
+            else:
+                return 0.40 if audio_cheat else 0.20
         else:
-            return 0.15 if y_cheat != 0 else 0.10
+            if y_cheat == 0:
+                return 0.40 if audio_cheat else 0.10
+            else:
+                return 0.25 if audio_cheat else 0.15
     else:
         if x_cheat == 0:
-            return 0.55 if y_cheat != 0 else 0.0
+            if y_cheat == 0:
+                return 0.55 if audio_cheat else 0.0
+            else:
+                return 0.85 if audio_cheat else 0.55
         else:
-            return 0.50 if y_cheat != 0 else 0.60
+            if y_cheat == 0:
+                return 0.85 if audio_cheat else 0.60
+            else:
+                return 0.85 if audio_cheat else 0.50
 
 
 # ==============================================================================
-# WebRTC Video Processor (Processes candidate browser camera stream)
+# WebRTC Audio Processor (Analyzes microphone sound level in real-time)
+# ==============================================================================
+class ProctoringAudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.state = shared_state
+
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        try:
+            samples = frame.to_ndarray()
+            if np.issubdtype(samples.dtype, np.integer):
+                samples = samples.astype(np.float64) / 32768.0
+            else:
+                samples = samples.astype(np.float64)
+
+            rms = float(np.sqrt(np.mean(samples**2)) * 1000.0)
+            with self.state.lock:
+                self.state.audio_amplitude = rms
+                if rms > self.state.audio_threshold:
+                    self.state.audio_cheat = 1
+                else:
+                    self.state.audio_cheat = 0
+        except Exception:
+            pass
+
+        return frame
+
+
+# ==============================================================================
+# WebRTC Video Processor (Face Mesh + Gaze Estimation + Audio Fusion)
 # ==============================================================================
 class ProctoringVideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.lock = threading.Lock()
+        self.state = shared_state
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             min_detection_confidence=0.5,
@@ -108,7 +169,7 @@ class ProctoringVideoProcessor(VideoProcessorBase):
         )
         self.mp_drawing = mp.solutions.drawing_utils
 
-        # Live telemetry properties
+        # Live telemetry
         self.gaze_text = "Forward"
         self.yaw_angle = 0.0
         self.pitch_angle = 0.0
@@ -119,7 +180,7 @@ class ProctoringVideoProcessor(VideoProcessorBase):
         self.incidents = []
         self.prob_history = [0.0] * 60
 
-        # Sliders / Configuration (synchronized dynamically)
+        # Sliders / Configuration
         self.yaw_threshold = 10
         self.pitch_threshold = 8
         self.cheat_threshold = 0.60
@@ -129,7 +190,7 @@ class ProctoringVideoProcessor(VideoProcessorBase):
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
 
-        # Flip horizontally for natural selfie perspective
+        # Mirror for natural selfie perspective
         image = cv2.flip(image, 1)
         img_h, img_w, _ = image.shape
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -217,8 +278,13 @@ class ProctoringVideoProcessor(VideoProcessorBase):
             x_axis_cheat = 1
             y_axis_cheat = 1
 
+        # Read shared audio state
+        with self.state.lock:
+            audio_cheat = self.state.audio_cheat
+            audio_amp = self.state.audio_amplitude
+
         with self.lock:
-            weight = compute_frame_weight(self.global_cheat, x_axis_cheat, y_axis_cheat)
+            weight = compute_frame_weight(self.global_cheat, x_axis_cheat, y_axis_cheat, audio_cheat)
             self.percentage_cheat = update_cheat_percentage(weight, self.percentage_cheat)
 
             if self.percentage_cheat > self.cheat_threshold:
@@ -236,76 +302,91 @@ class ProctoringVideoProcessor(VideoProcessorBase):
 
             # Incident logging
             now = time.time()
-            if (x_axis_cheat or y_axis_cheat or self.global_cheat) and (now - self.last_log_time > 2.0):
+            if (x_axis_cheat or y_axis_cheat or audio_cheat or self.global_cheat) and (now - self.last_log_time > 2.0):
+                reasons = []
+                if x_axis_cheat or y_axis_cheat:
+                    reasons.append(gaze_text)
+                if audio_cheat:
+                    reasons.append(f"Noise (RMS: {audio_amp:.1f})")
+                if self.global_cheat:
+                    reasons.append("High Suspicion")
+
                 self.incidents.insert(0, {
                     "Timestamp": datetime.now().strftime("%H:%M:%S"),
-                    "Incident": gaze_text if not self.global_cheat else f"{gaze_text} (High Suspicion)",
+                    "Incident": " + ".join(reasons),
                     "Cheat Score": f"{self.percentage_cheat:.2f}"
                 })
                 self.total_violations += 1
                 self.last_log_time = now
 
-        # On-frame HUD status text
+        # On-frame HUD status overlay
         cv2.putText(image, f"Status: {gaze_text}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, gaze_color, 2)
         cv2.putText(image, f"Cheat Score: {self.percentage_cheat:.2f}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        if audio_cheat:
+            cv2.putText(image, f"AUDIO ALERT: {audio_amp:.1f} RMS", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
         if self.global_cheat:
-            cv2.putText(image, "CHEATING DETECTED", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
+            cv2.putText(image, "CHEATING DETECTED", (20, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
 
         return av.VideoFrame.from_ndarray(image, format="bgr24")
 
 
 # ==============================================================================
-# UI Dashboard Layout & Controls (Original Layout Restored)
+# UI Dashboard Layout & Controls
 # ==============================================================================
 st.title("🛡️ Parallax AI Proctoring Dashboard")
 st.caption("Real-Time Autonomous Exam Integrity & Head-Pose / Audio Monitoring")
 
 # Sidebar
 st.sidebar.header("⚙️ Session Controls")
-st.sidebar.info("Camera streaming is enabled below via browser WebRTC.")
+st.sidebar.info("Audio & Video streaming enabled via browser WebRTC.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Sensitivity Settings")
 yaw_threshold = st.sidebar.slider("Gaze Yaw Threshold (Left/Right °)", 5, 30, 10)
 pitch_threshold = st.sidebar.slider("Gaze Pitch Threshold (Down °)", 5, 25, 8)
-audio_threshold = st.sidebar.slider("Audio Amplitude Limit", 5, 50, 20)
+audio_threshold = st.sidebar.slider("Audio Amplitude Limit (RMS)", 1, 50, 15)
 cheat_threshold = st.sidebar.slider("Cheating Threshold", 0.3, 0.9, 0.6, 0.05)
+
+# Sync audio limit immediately to shared state
+with shared_state.lock:
+    shared_state.audio_threshold = float(audio_threshold)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("👁️ Visual Overlays")
 draw_mesh = st.sidebar.checkbox("Show Face Mesh Contours", value=True)
 draw_vector = st.sidebar.checkbox("Show 3D Gaze Vector", value=True)
 
-# Google public STUN server for NAT traversal
+# Google public STUN server for WebRTC NAT traversal
 RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
-# Top Status Banner Placeholder
+# Status Banner Placeholder
 status_placeholder = st.empty()
 
-# Metric Columns
+# 4 Metric Cards
 m1, m2, m3, m4 = st.columns(4)
 with m1:
     prob_metric = st.empty()
 with m2:
     gaze_metric = st.empty()
 with m3:
-    yaw_metric = st.empty()
+    audio_metric = st.empty()
 with m4:
     events_metric = st.empty()
 
-# Workspace Columns (Original 2-column structure restored!)
+# Main Workspace Columns
 col_video, col_charts = st.columns([1.3, 1.0])
 
 with col_video:
-    st.subheader("📹 Candidate Video Stream")
+    st.subheader("📹 Candidate Video & Audio Stream")
     webrtc_ctx = webrtc_streamer(
         key="parallax-proctor",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIGURATION,
         video_processor_factory=ProctoringVideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
+        audio_processor_factory=ProctoringAudioProcessor,
+        media_stream_constraints={"video": True, "audio": True},
         async_processing=True,
     )
 
@@ -315,11 +396,11 @@ with col_charts:
     st.subheader("📋 Violation Incident Log")
     log_placeholder = st.empty()
 
-# Process data and update dashboard in real time
+# Reactive Real-Time Polling Loop while stream is active
 if webrtc_ctx.state.playing:
     while webrtc_ctx.state.playing:
         if webrtc_ctx.video_processor:
-            # Synchronize sidebar controls with processor
+            # Sync video processor parameters
             webrtc_ctx.video_processor.yaw_threshold = yaw_threshold
             webrtc_ctx.video_processor.pitch_threshold = pitch_threshold
             webrtc_ctx.video_processor.cheat_threshold = cheat_threshold
@@ -335,6 +416,10 @@ if webrtc_ctx.state.playing:
                 incidents = list(webrtc_ctx.video_processor.incidents)
                 is_cheat = webrtc_ctx.video_processor.global_cheat
 
+            with shared_state.lock:
+                audio_amp = shared_state.audio_amplitude
+                audio_flag = shared_state.audio_cheat
+
             # Status Banner
             if is_cheat:
                 status_placeholder.markdown(f"""
@@ -343,10 +428,10 @@ if webrtc_ctx.state.playing:
                         <span>CHEATING FLAGGED</span>
                     </div>
                 """, unsafe_allow_html=True)
-            elif score > 0.35:
+            elif score > 0.35 or audio_flag:
                 status_placeholder.markdown(f"""
                     <div class="status-banner status-warning">
-                        <span>⚠️ CAUTION: Irregular gaze activity detected</span>
+                        <span>⚠️ CAUTION: Irregular gaze or sound activity detected</span>
                         <span>MONITORING CLOSELY</span>
                     </div>
                 """, unsafe_allow_html=True)
@@ -361,7 +446,7 @@ if webrtc_ctx.state.playing:
             # 4 Metric Cards
             prob_metric.metric("Cheat Probability", f"{score * 100:.1f}%")
             gaze_metric.metric("Gaze Direction", gaze)
-            yaw_metric.metric("Yaw / Pitch Angle", f"{yaw:.1f}°")
+            audio_metric.metric("Noise RMS", f"{audio_amp:.1f}", delta="Spike" if audio_flag else "Normal")
             events_metric.metric("Flagged Events", f"{violations}")
 
             # Live Rolling Trend Chart
@@ -373,7 +458,7 @@ if webrtc_ctx.state.playing:
 
         time.sleep(0.2)
 
-    # Export Audit Report in Sidebar
+    # Export Report in Sidebar
     if incidents:
         csv_data = pd.DataFrame(incidents).to_csv(index=False).encode('utf-8')
         st.sidebar.download_button(
@@ -387,13 +472,13 @@ else:
     # Idle Standby State
     status_placeholder.markdown("""
         <div class="status-banner status-clean">
-            <span>⚪ SYSTEM IDLE — Click 'START' in the camera player below to grant camera access</span>
+            <span>⚪ SYSTEM IDLE — Click 'START' below to grant camera and microphone access</span>
             <span>STANDBY</span>
         </div>
     """, unsafe_allow_html=True)
     prob_metric.metric("Cheat Probability", "0.0%")
     gaze_metric.metric("Gaze Direction", "Offline")
-    yaw_metric.metric("Yaw / Pitch Angle", "0.0°")
+    audio_metric.metric("Noise RMS", "0.0")
     events_metric.metric("Flagged Events", "0")
     chart_placeholder.line_chart(pd.DataFrame({"Cheat Probability": [0.0] * 50}), height=240)
     log_placeholder.info("Camera is offline. Start the stream to view live audit incidents.")
