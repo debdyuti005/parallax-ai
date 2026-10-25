@@ -77,10 +77,10 @@ def process():
 
     if PERCENTAGE_CHEAT > CHEAT_THRESH:
         GLOBAL_CHEAT = 1
-        # print("CHEATING")  # Commented out for cleaner terminal
+        print("CHEATING")
     else:
         GLOBAL_CHEAT = 0
-    # print("Cheat percent: ", PERCENTAGE_CHEAT, GLOBAL_CHEAT)  # Commented out for cleaner terminal
+    print("Cheat percent: ", PERCENTAGE_CHEAT, GLOBAL_CHEAT)
 
 def run_detection():
     global XDATA,YDATA
@@ -89,7 +89,7 @@ def run_detection():
     axes.set_xlim(0, 200)
     axes.set_ylim(0,1)
     line, = axes.plot(XDATA, YDATA, 'r-')
-    plt.title("Suspicious Behaviour Detection")
+    plt.title("SUSpicious Behaviour Detection")
     plt.xlabel("Time")
     plt.ylabel("Cheat Probablity")
     i = 0

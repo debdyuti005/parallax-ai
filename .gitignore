@@ -1,5 +1,10 @@
 *.bak
 __pycache__/
-parallax_py310/
-proctoring_state.json
-violations_log.json
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+.vscode/
+.idea/
